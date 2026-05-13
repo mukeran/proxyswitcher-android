@@ -1,0 +1,5 @@
+<resources>
+    <color name="proxy_teal">#00897B</color>
+    <color name="proxy_surface">#FAFAFA</color>
+    <color name="proxy_text_secondary">#6A6A6A</color>
+</resources>

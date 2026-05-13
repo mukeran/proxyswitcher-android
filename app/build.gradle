@@ -1,0 +1,28 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'codes.var.proxyswitcher'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'codes.var.proxyswitcher'
+        minSdk 24
+        targetSdk 36
+        versionCode 1
+        versionName '0.1.0'
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile '../AndroidManifest.xml'
+            java.srcDirs = ['../src/main/java']
+            res.srcDirs = ['../src/main/res']
+        }
+    }
+}
+
+dependencies {
+    implementation 'com.github.topjohnwu.libsu:core:6.0.0'
+}
