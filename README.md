@@ -5,7 +5,7 @@ Android companion implementation for the iOS ProxySwitcher tweak.
 It provides:
 
 - a native Android app for saving HTTP proxy profiles;
-- a Quick Settings tile for switching between Direct and the last active proxy;
+- a Quick Settings tile dialog for selecting Direct / Profile / Wi-Fi;
 - an LSPosed module that applies the current Wi-Fi HTTP proxy inside the Android framework process.
 
 ## Build
@@ -33,4 +33,4 @@ Output paths:
 
 Install the APK on a rooted Android device. Enable the ProxySwitcher module in LSPosed, scope it to Android/System Framework, then reboot. Open ProxySwitcher, add one or more profiles, then tap `Direct` or a profile to apply it. Add the `ProxySwitcher` tile from Android Quick Settings for fast switching.
 
-Android Quick Settings tiles do not support iOS-style long-press action menus. In this project, tapping the tile toggles Direct and active profile, and tapping the tile opens a dialog for explicit profile / Wi-Fi selection.
+In this project, tapping the tile opens a dialog with three sections (`Direct`, `Profiles`, `Wi-Fi`) for explicit switching.
