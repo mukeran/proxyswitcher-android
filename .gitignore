@@ -16,6 +16,7 @@ captures/
 .externalNativeBuild/
 .cxx/
 local.properties
+src/main/jniLibs/
 
 # Packaged artifacts
 *.apk

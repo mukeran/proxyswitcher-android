@@ -9,6 +9,10 @@ GRADLE_DIR="$ROOT_DIR/.gradle-dist"
 GRADLE_HOME="$GRADLE_DIR/gradle-$GRADLE_VERSION"
 GRADLE_BIN="$GRADLE_HOME/bin/gradle"
 SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+if [ -z "${ANDROID_NDK:-}" ] && [ -z "${ANDROID_NDK_HOME:-}" ] && [ -d "$SDK_DIR/ndk" ]; then
+  ANDROID_NDK="$(ls -d "$SDK_DIR"/ndk/* 2>/dev/null | sort -V | tail -n 1)"
+  export ANDROID_NDK
+fi
 
 cat > "$ROOT_DIR/local.properties" <<EOF
 sdk.dir=$SDK_DIR

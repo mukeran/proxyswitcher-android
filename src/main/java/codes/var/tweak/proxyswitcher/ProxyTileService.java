@@ -6,6 +6,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.util.Log;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
@@ -15,6 +16,7 @@ import android.service.quicksettings.TileService;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.BaseAdapter;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -30,6 +32,7 @@ import java.util.concurrent.Executors;
 @TargetApi(Build.VERSION_CODES.N)
 public final class ProxyTileService extends TileService {
     private static final String ACTION_PROXY_CHANGE = "android.intent.action.PROXY_CHANGE";
+    private static final String TAG = "ProxySwitcherTile";
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Runnable refreshFromSystemEvent = () -> requestWiFiSnapshot(false);
@@ -39,6 +42,7 @@ public final class ProxyTileService extends TileService {
     private BroadcastReceiver stateReceiver;
     private boolean receiverRegistered;
     private boolean operationInProgress;
+    private boolean closeDialogOnSuccess;
     private String lastWiFiSnapshotToken;
 
     @Override
@@ -84,9 +88,9 @@ public final class ProxyTileService extends TileService {
         tile.setState(direct ? Tile.STATE_INACTIVE : Tile.STATE_ACTIVE);
         tile.setLabel("ProxySwitcher");
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            String modeLabel = ProxyStore.MODE_VPN.equals(store.runtimeMode()) ? "VPN" : "Root";
             String profileName = direct ? "Direct" : activeProfileName(store, active);
-            String endpoint = direct ? "No HTTP proxy" : activeProfileEndpoint(store, active);
-            tile.setSubtitle(profileName + " · " + endpoint);
+            tile.setSubtitle(modeLabel + " · " + profileName);
         }
         tile.updateTile();
     }
@@ -96,15 +100,13 @@ public final class ProxyTileService extends TileService {
         return profile == null ? "ProxySwitcher" : profile.name;
     }
 
-    private String activeProfileEndpoint(ProxyStore store, String identifier) {
-        ProxyProfile profile = store.profileWithIdentifier(identifier);
-        if (profile == null) {
-            return "HTTP proxy active";
-        }
-        return profile.host + ":" + profile.port;
-    }
-
     private void showProfileDialog() {
+        if (currentDialog != null && currentDialog.isShowing()) {
+            return;
+        }
+        if (!isSecure() && isLocked()) {
+            return;
+        }
         ProxyStore store = new ProxyStore(this);
         requestWiFiSnapshot(false);
         ListView listView = new ListView(this);
@@ -139,6 +141,7 @@ public final class ProxyTileService extends TileService {
             if (row == null || row.header || row.footer) {
                 return;
             }
+            closeDialogOnSuccess = true;
             if (row.wifiSsid != null) {
                 switchWifi(row.wifiSsid);
                 return;
@@ -154,9 +157,22 @@ public final class ProxyTileService extends TileService {
             currentDialog = null;
             currentAdapter = null;
             dialogLoadingOverlay = null;
+            closeDialogOnSuccess = false;
         });
         currentDialog = dialog;
-        showDialog(dialog);
+        try {
+            showDialog(dialog);
+        } catch (WindowManager.BadTokenException badTokenException) {
+            Log.w(TAG, "Unable to show tile dialog due to invalid token", badTokenException);
+            currentDialog = null;
+            currentAdapter = null;
+            dialogLoadingOverlay = null;
+        } catch (IllegalStateException illegalStateException) {
+            Log.w(TAG, "Unable to show tile dialog due to tile state", illegalStateException);
+            currentDialog = null;
+            currentAdapter = null;
+            dialogLoadingOverlay = null;
+        }
     }
 
     private void applyIdentifier(String identifier) {
@@ -166,14 +182,31 @@ public final class ProxyTileService extends TileService {
         setOperationInProgress(true);
         executor.execute(() -> {
             ProxyStore store = new ProxyStore(this);
-            RootProxyApplier applier = new RootProxyApplier(this);
+            boolean vpnMode = ProxyStore.MODE_VPN.equals(store.runtimeMode());
             RootProxyApplier.Result result;
-            if (ProxyStore.DIRECT_IDENTIFIER.equals(identifier)) {
-                result = applier.applyDirect();
+            if (vpnMode) {
+                VpnProxyController controller = new VpnProxyController(this);
+                if (ProxyStore.DIRECT_IDENTIFIER.equals(identifier)) {
+                    result = controller.applyDirect();
+                } else {
+                    result = controller.applyProfile(store.profileWithIdentifier(identifier));
+                }
             } else {
-                result = applier.applyProfile(store.profileWithIdentifier(identifier));
+                RootProxyApplier applier = new RootProxyApplier(this);
+                if (ProxyStore.DIRECT_IDENTIFIER.equals(identifier)) {
+                    result = applier.applyDirect();
+                } else {
+                    result = applier.applyProfile(store.profileWithIdentifier(identifier));
+                }
             }
             if (result.ok) {
+                if (vpnMode) {
+                    setOperationInProgress(false);
+                    updateTile();
+                    refreshDialogRows();
+                    dismissDialogForSuccess();
+                    return;
+                }
                 ProxyInteractionFlow.onApplyRequested(
                         mainHandler,
                         () -> requestWiFiSnapshot(true),
@@ -182,6 +215,7 @@ public final class ProxyTileService extends TileService {
                 );
                 return;
             }
+            closeDialogOnSuccess = false;
             setOperationInProgress(false);
         });
     }
@@ -191,6 +225,10 @@ public final class ProxyTileService extends TileService {
             return;
         }
         if (operationInProgress) {
+            return;
+        }
+        ProxyStore store = new ProxyStore(this);
+        if (ProxyStore.MODE_VPN.equals(store.runtimeMode())) {
             return;
         }
         setOperationInProgress(true);
@@ -226,7 +264,10 @@ public final class ProxyTileService extends TileService {
                     return;
                 }
                 String action = intent.getAction();
+                ProxyStore store = new ProxyStore(ProxyTileService.this);
+                boolean vpnMode = ProxyStore.MODE_VPN.equals(store.runtimeMode());
                 if (ProxyActions.ACTION_LIST_WIFI.equals(action)) {
+                    boolean wasOperationInProgress = operationInProgress;
                     String token = intent.getStringExtra(ProxyActions.EXTRA_REQUEST_TOKEN);
                     boolean tokenMatch = lastWiFiSnapshotToken != null && lastWiFiSnapshotToken.equals(token);
                     boolean dialogShowing = currentDialog != null && currentDialog.isShowing();
@@ -237,16 +278,18 @@ public final class ProxyTileService extends TileService {
                     ArrayList<String> hints = intent.getStringArrayListExtra(ProxyActions.EXTRA_WIFI_PROXY_LIST);
                     String currentSsid = intent.getStringExtra(ProxyActions.EXTRA_CURRENT_SSID);
                     String currentProxy = intent.getStringExtra(ProxyActions.EXTRA_CURRENT_PROXY);
-                    ProxyStore store = new ProxyStore(ProxyTileService.this);
                     ProxyStateSync.applySnapshot(store, ssids, hints, currentSsid, currentProxy);
                     setOperationInProgress(false);
                     updateTile();
                     refreshDialogRows();
+                    if (wasOperationInProgress) {
+                        dismissDialogForSuccess();
+                    }
                     return;
                 }
-                if (WifiManager.NETWORK_STATE_CHANGED_ACTION.equals(action)
+                if (!vpnMode && (WifiManager.NETWORK_STATE_CHANGED_ACTION.equals(action)
                         || WifiManager.WIFI_STATE_CHANGED_ACTION.equals(action)
-                        || ACTION_PROXY_CHANGE.equals(action)) {
+                        || ACTION_PROXY_CHANGE.equals(action))) {
                     if (operationInProgress) {
                         requestWiFiSnapshot(false);
                     }
@@ -255,6 +298,20 @@ public final class ProxyTileService extends TileService {
                     return;
                 }
                 if (ProxyStore.ACTION_CHANGED.equals(action)) {
+                    updateTile();
+                    refreshDialogRows();
+                    return;
+                }
+                if (ProxyActions.ACTION_VPN_STATE_CHANGED.equals(action)) {
+                    boolean running = intent.getBooleanExtra(ProxyActions.EXTRA_VPN_RUNNING, false);
+                    String endpoint = intent.getStringExtra(ProxyActions.EXTRA_VPN_ENDPOINT);
+                    if (vpnMode) {
+                        if (running && endpoint != null && !endpoint.isEmpty()) {
+                            ProxyStateSync.syncActiveProfileWithSystemProxy(store, endpoint);
+                        } else {
+                            store.setActiveIdentifier(ProxyStore.DIRECT_IDENTIFIER);
+                        }
+                    }
                     updateTile();
                     refreshDialogRows();
                 }
@@ -266,6 +323,7 @@ public final class ProxyTileService extends TileService {
         filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
         filter.addAction(ACTION_PROXY_CHANGE);
         filter.addAction(ProxyStore.ACTION_CHANGED);
+        filter.addAction(ProxyActions.ACTION_VPN_STATE_CHANGED);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(stateReceiver, filter, RECEIVER_EXPORTED);
         } else {
@@ -287,6 +345,10 @@ public final class ProxyTileService extends TileService {
     }
 
     private void requestWiFiSnapshot(boolean delayed) {
+        ProxyStore store = new ProxyStore(this);
+        if (ProxyStore.MODE_VPN.equals(store.runtimeMode())) {
+            return;
+        }
         lastWiFiSnapshotToken = String.valueOf(System.currentTimeMillis());
         Runnable task = () -> sendBroadcast(new Intent(ProxyActions.ACTION_LIST_WIFI)
                 .putExtra(ProxyActions.EXTRA_REQUEST_TOKEN, lastWiFiSnapshotToken)
@@ -307,11 +369,24 @@ public final class ProxyTileService extends TileService {
         });
     }
 
+    private void dismissDialogForSuccess() {
+        if (!closeDialogOnSuccess) {
+            return;
+        }
+        closeDialogOnSuccess = false;
+        mainHandler.post(() -> {
+            if (currentDialog != null && currentDialog.isShowing()) {
+                currentDialog.dismiss();
+            }
+        });
+    }
+
     private final class DialogAdapter extends BaseAdapter {
         private final ArrayList<Row> rows = new ArrayList<>();
 
         void buildRows(ProxyStore store) {
             rows.clear();
+            boolean vpnMode = ProxyStore.MODE_VPN.equals(store.runtimeMode());
             String active = store.activeIdentifier();
             rows.add(Row.header("Direct"));
             rows.add(Row.proxy("Direct", "No HTTP proxy", ProxyStore.DIRECT_IDENTIFIER, ProxyStore.DIRECT_IDENTIFIER.equals(active)));
@@ -327,16 +402,20 @@ public final class ProxyTileService extends TileService {
             }
 
             rows.add(Row.header("Wi-Fi"));
-            List<String> ssids = store.quickWiFiSSIDs();
-            String currentSsid = store.currentWiFiSSID();
-            if (ssids.isEmpty()) {
-                rows.add(Row.footer("No saved Wi-Fi"));
+            if (vpnMode) {
+                rows.add(Row.footer("Wi-Fi switching unavailable in VPN mode"));
             } else {
-                for (String ssid : ssids) {
-                    String proxyHint = store.wiFiProxyHint(ssid);
-                    String subtitle = (ssid.equals(currentSsid) ? "Current" : "Saved Wi-Fi")
-                            + " · Proxy: " + (proxyHint == null || proxyHint.isEmpty() ? "Direct" : proxyHint);
-                    rows.add(Row.wifi(ssid, subtitle, ssid.equals(currentSsid)));
+                List<String> ssids = store.quickWiFiSSIDs();
+                String currentSsid = store.currentWiFiSSID();
+                if (ssids.isEmpty()) {
+                    rows.add(Row.footer("No saved Wi-Fi"));
+                } else {
+                    for (String ssid : ssids) {
+                        String proxyHint = store.wiFiProxyHint(ssid);
+                        String subtitle = (ssid.equals(currentSsid) ? "Current" : "Saved Wi-Fi")
+                                + " · Proxy: " + (proxyHint == null || proxyHint.isEmpty() ? "Direct" : proxyHint);
+                        rows.add(Row.wifi(ssid, subtitle, ssid.equals(currentSsid)));
+                    }
                 }
             }
             notifyDataSetChanged();

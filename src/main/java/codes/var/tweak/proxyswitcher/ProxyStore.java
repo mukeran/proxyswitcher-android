@@ -16,6 +16,9 @@ final class ProxyStore {
     static final String TEMPORARY_IDENTIFIER = "temporary";
     static final String ACTION_CHANGED = "codes.var.tweak.proxyswitcher.PROFILES_CHANGED";
 
+    static final String MODE_ROOT = "root";
+    static final String MODE_VPN = "vpn";
+
     private static final String PREFS = "codes.var.tweak.proxyswitcher";
     private static final String PROFILES = "profiles";
     private static final String ACTIVE_IDENTIFIER = "ActiveIdentifier";
@@ -25,6 +28,7 @@ final class ProxyStore {
     private static final String QUICK_WIFI_SSIDS = "QuickWiFiSSIDs";
     private static final String WIFI_PROXY_HINTS = "WiFiProxyHints";
     private static final String CURRENT_WIFI_SSID = "CurrentWiFiSSID";
+    private static final String RUNTIME_MODE = "RuntimeMode";
 
     private final Context context;
     private final SharedPreferences preferences;
@@ -107,6 +111,19 @@ final class ProxyStore {
     String activeIdentifier() {
         String value = preferences.getString(ACTIVE_IDENTIFIER, DIRECT_IDENTIFIER);
         return value == null ? DIRECT_IDENTIFIER : value;
+    }
+
+    String runtimeMode() {
+        String value = preferences.getString(RUNTIME_MODE, MODE_ROOT);
+        if (MODE_VPN.equals(value)) {
+            return MODE_VPN;
+        }
+        return MODE_ROOT;
+    }
+
+    void setRuntimeMode(String mode) {
+        preferences.edit().putString(RUNTIME_MODE, MODE_VPN.equals(mode) ? MODE_VPN : MODE_ROOT).apply();
+        notifyChanged();
     }
 
     String lastActiveProfileIdentifier() {
@@ -274,7 +291,8 @@ final class ProxyStore {
     }
 
     String diagnosticsSummary() {
-        return "SSID=" + currentWiFiSSID()
+        return "mode=" + runtimeMode()
+                + ", SSID=" + currentWiFiSSID()
                 + ", active=" + activeIdentifier()
                 + ", profiles=" + profiles().size()
                 + ", quickWiFi=" + quickWiFiSSIDs().size();

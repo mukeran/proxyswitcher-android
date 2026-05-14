@@ -2,6 +2,37 @@ plugins {
     id 'com.android.application'
 }
 
+def tun2httpDir = file("${rootProject.projectDir}/third_party/proxyswitcher-tun2http")
+def tun2httpBuildScript = file("${tun2httpDir}/scripts/build-android.sh")
+def tun2httpBuildOut = file("${tun2httpDir}/build/android")
+def appJniLibsDir = file("${rootProject.projectDir}/src/main/jniLibs")
+
+tasks.register('buildTun2HttpSo', Exec) {
+    workingDir tun2httpDir
+    commandLine 'bash', tun2httpBuildScript.absolutePath
+}
+
+tasks.register('syncTun2HttpSo', Sync) {
+    dependsOn 'buildTun2HttpSo'
+    into appJniLibsDir
+
+    from("${tun2httpBuildOut}/arm64-v8a") {
+        include 'libproxyswitcher_tun2http.so'
+        into 'arm64-v8a'
+        rename { 'libtun2http.so' }
+    }
+    from("${tun2httpBuildOut}/armeabi-v7a") {
+        include 'libproxyswitcher_tun2http.so'
+        into 'armeabi-v7a'
+        rename { 'libtun2http.so' }
+    }
+    from("${tun2httpBuildOut}/x86_64") {
+        include 'libproxyswitcher_tun2http.so'
+        into 'x86_64'
+        rename { 'libtun2http.so' }
+    }
+}
+
 android {
     namespace 'codes.var.tweak.proxyswitcher'
     compileSdk 36
@@ -12,6 +43,9 @@ android {
         targetSdk 36
         versionCode 1
         versionName '0.1.0'
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+        }
     }
 
     buildTypes {
@@ -32,12 +66,17 @@ android {
             java.srcDirs = ['../src/main/java']
             res.srcDirs = ['../src/main/res']
             assets.srcDirs = ['../src/main/assets']
+            jniLibs.srcDirs = ['../src/main/jniLibs']
         }
     }
 
     buildFeatures {
         buildConfig true
     }
+}
+
+tasks.named('preBuild') {
+    dependsOn 'syncTun2HttpSo'
 }
 
 dependencies {

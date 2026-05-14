@@ -5,6 +5,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.net.VpnService;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -22,6 +23,8 @@ import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 
 import com.google.android.material.appbar.MaterialToolbar;
@@ -51,7 +54,37 @@ public final class MainActivity extends AppCompatActivity {
     private boolean moduleReady;
     private long statusRequestAtMs;
     private boolean operationInProgress;
+    private String pendingApplyIdentifier;
+    private boolean pendingSwitchToVpn;
     private final Runnable refreshFromSystemEvent = () -> requestWiFiSnapshot(false);
+
+    private final ActivityResultLauncher<Intent> vpnPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (VpnService.prepare(this) == null) {
+                    if (pendingSwitchToVpn) {
+                        pendingSwitchToVpn = false;
+                        store.setRuntimeMode(ProxyStore.MODE_VPN);
+                        store.setActiveIdentifier(ProxyStore.DIRECT_IDENTIFIER);
+                        new VpnProxyController(this).stopVpn();
+                        reloadProfiles();
+                        return;
+                    }
+                    if (pendingApplyIdentifier == null) {
+                        reloadProfiles();
+                        return;
+                    }
+                    if (ProxyStore.DIRECT_IDENTIFIER.equals(pendingApplyIdentifier)) {
+                        applyDirect();
+                    } else {
+                        applyProfile(store.profileWithIdentifier(pendingApplyIdentifier));
+                    }
+                    pendingApplyIdentifier = null;
+                    return;
+                }
+                pendingSwitchToVpn = false;
+                pendingApplyIdentifier = null;
+                showError("VPN permission denied.");
+            });
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -65,6 +98,10 @@ public final class MainActivity extends AppCompatActivity {
         toolbar.setNavigationOnClickListener(v ->
                 startActivity(new Intent(this, DiagnosticsActivity.class)));
         toolbar.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == R.id.action_mode) {
+                showModeDialog();
+                return true;
+            }
             if (item.getItemId() == R.id.action_add_tile) {
                 requestAddTile();
                 return true;
@@ -82,7 +119,9 @@ public final class MainActivity extends AppCompatActivity {
         addFab.setOnClickListener(v -> {
             androidx.appcompat.widget.PopupMenu menu = new androidx.appcompat.widget.PopupMenu(this, v);
             menu.getMenu().add(0, 1, 0, "Profile");
-            menu.getMenu().add(0, 2, 1, "Saved Wi-Fi");
+            if (!isVpnMode()) {
+                menu.getMenu().add(0, 2, 1, "Saved Wi-Fi");
+            }
             menu.setOnMenuItemClickListener(item -> {
                 if (item.getItemId() == 1) {
                     startActivity(new Intent(this, ProfileEditorActivity.class));
@@ -103,10 +142,12 @@ public final class MainActivity extends AppCompatActivity {
 
         lsposedBanner = findViewById(R.id.card_lsposed_banner);
         MaterialButton helpButton = findViewById(R.id.button_lsposed_help);
+        MaterialButton nonRootButton = findViewById(R.id.button_non_root_mode);
         View.OnClickListener openHelp = v ->
                 startActivity(new Intent(this, LsposedHelpActivity.class));
         lsposedBanner.setOnClickListener(openHelp);
         helpButton.setOnClickListener(openHelp);
+        nonRootButton.setOnClickListener(v -> switchMode(ProxyStore.MODE_VPN));
     }
 
     @Override
@@ -135,6 +176,9 @@ public final class MainActivity extends AppCompatActivity {
                 }
                 String action = intent.getAction();
                 if (ProxyActions.ACTION_STATUS_RESULT.equals(action)) {
+                    if (isVpnMode()) {
+                        return;
+                    }
                     String token = intent.getStringExtra(ProxyActions.EXTRA_REQUEST_TOKEN);
                     if (lastStatusToken == null || !lastStatusToken.equals(token)) {
                         return;
@@ -167,6 +211,19 @@ public final class MainActivity extends AppCompatActivity {
                         || ACTION_PROXY_CHANGE.equals(action)) {
                     mainHandler.removeCallbacks(refreshFromSystemEvent);
                     mainHandler.postDelayed(refreshFromSystemEvent, 600);
+                    return;
+                }
+                if (ProxyActions.ACTION_VPN_STATE_CHANGED.equals(action)) {
+                    boolean running = intent.getBooleanExtra(ProxyActions.EXTRA_VPN_RUNNING, false);
+                    String endpoint = intent.getStringExtra(ProxyActions.EXTRA_VPN_ENDPOINT);
+                    if (isVpnMode()) {
+                        if (running && endpoint != null && !endpoint.isEmpty()) {
+                            ProxyStateSync.syncActiveProfileWithSystemProxy(store, endpoint);
+                        } else {
+                            store.setActiveIdentifier(ProxyStore.DIRECT_IDENTIFIER);
+                        }
+                    }
+                    reloadProfiles();
                 }
             }
         };
@@ -176,6 +233,7 @@ public final class MainActivity extends AppCompatActivity {
         filter.addAction(WifiManager.NETWORK_STATE_CHANGED_ACTION);
         filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
         filter.addAction(ACTION_PROXY_CHANGE);
+        filter.addAction(ProxyActions.ACTION_VPN_STATE_CHANGED);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(wifiListReceiver, filter, RECEIVER_EXPORTED);
         } else {
@@ -232,9 +290,10 @@ public final class MainActivity extends AppCompatActivity {
     private void reloadProfiles() {
         String active = store.activeIdentifier();
         List<ProxyProfile> profiles = store.profiles();
-        adapter.setRows(profiles, active, effectiveTemporary(), store.quickWiFiSSIDs(), store.currentWiFiSSID(), moduleReady);
+        boolean vpnMode = isVpnMode();
+        adapter.setRows(profiles, active, effectiveTemporary(), store.quickWiFiSSIDs(), store.currentWiFiSSID(), moduleReady, vpnMode);
         if (lsposedBanner != null) {
-            lsposedBanner.setVisibility(moduleReady ? View.GONE : View.VISIBLE);
+            lsposedBanner.setVisibility(moduleReady || vpnMode ? View.GONE : View.VISIBLE);
         }
     }
 
@@ -244,6 +303,10 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void applyDirect() {
+        if (isVpnMode()) {
+            runApply(() -> new VpnProxyController(this).applyDirect());
+            return;
+        }
         if (!ensureModuleReady()) {
             return;
         }
@@ -251,19 +314,27 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void applyTemporary() {
-        if (!ensureModuleReady()) {
-            return;
-        }
         ProxyProfile temporary = effectiveTemporary();
         if (temporary == null) {
             showError("Temporary proxy not found.");
             return;
         }
         store.setTemporaryProfile(temporary);
-        runApply(() -> new RootProxyApplier(this).applyProfile(temporary));
+        applyProfile(temporary);
     }
 
     private void applyProfile(ProxyProfile profile) {
+        if (profile == null) {
+            showError("Proxy profile not found.");
+            return;
+        }
+        if (isVpnMode()) {
+            if (!ensureVpnPrepared(profile.identifier)) {
+                return;
+            }
+            runApply(() -> new VpnProxyController(this).applyProfile(profile));
+            return;
+        }
         if (!ensureModuleReady()) {
             return;
         }
@@ -271,17 +342,29 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void runApply(ApplyTask task) {
+        runApply(task, null);
+    }
+
+    private void runApply(ApplyTask task, Runnable onSuccess) {
         setOperationInProgress(true);
         executor.execute(() -> {
             RootProxyApplier.Result result = task.run();
             mainHandler.post(() -> {
                 if (result.ok) {
-                    ProxyInteractionFlow.onApplyRequested(
-                            mainHandler,
-                            () -> requestWiFiSnapshot(true),
-                            () -> operationInProgress,
-                            () -> setOperationInProgress(false)
-                    );
+                    if (isVpnMode()) {
+                        if (onSuccess != null) {
+                            onSuccess.run();
+                        }
+                        setOperationInProgress(false);
+                        reloadProfiles();
+                    } else {
+                        ProxyInteractionFlow.onApplyRequested(
+                                mainHandler,
+                                () -> requestWiFiSnapshot(true),
+                                () -> operationInProgress,
+                                () -> setOperationInProgress(false)
+                        );
+                    }
                 } else {
                     setOperationInProgress(false);
                     showError(result.message == null || result.message.isEmpty()
@@ -335,6 +418,10 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void switchWifi(String ssid) {
+        if (isVpnMode()) {
+            showError("VPN mode does not support switching Wi-Fi.");
+            return;
+        }
         if (!ensureModuleReady()) {
             return;
         }
@@ -368,6 +455,11 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void requestModuleStatus() {
+        if (isVpnMode()) {
+            moduleReady = false;
+            reloadProfiles();
+            return;
+        }
         lastStatusToken = String.valueOf(System.currentTimeMillis());
         statusRequestAtMs = System.currentTimeMillis();
         moduleReady = false;
@@ -382,7 +474,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void requestWiFiSnapshot(boolean delayed) {
-        if (!moduleReady) {
+        if (!moduleReady || isVpnMode()) {
             return;
         }
         lastWiFiSnapshotToken = String.valueOf(System.currentTimeMillis());
@@ -402,6 +494,63 @@ public final class MainActivity extends AppCompatActivity {
         }
         requestModuleStatus();
         return false;
+    }
+
+    private boolean ensureVpnPrepared(String applyIdentifier) {
+        VpnProxyController controller = new VpnProxyController(this);
+        Intent permissionIntent = controller.preparePermissionIntent();
+        if (permissionIntent == null) {
+            return true;
+        }
+        pendingApplyIdentifier = applyIdentifier;
+        vpnPermissionLauncher.launch(permissionIntent);
+        return false;
+    }
+
+    private boolean isVpnMode() {
+        return ProxyStore.MODE_VPN.equals(store.runtimeMode());
+    }
+
+    private void showModeDialog() {
+        final String current = store.runtimeMode();
+        final CharSequence[] items = new CharSequence[]{"Root (LSPosed)", "Non-root (VPN)"};
+        int checked = ProxyStore.MODE_VPN.equals(current) ? 1 : 0;
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Working mode")
+                .setSingleChoiceItems(items, checked, (dialog, which) -> {
+                    String targetMode = which == 1 ? ProxyStore.MODE_VPN : ProxyStore.MODE_ROOT;
+                    if (targetMode.equals(current)) {
+                        dialog.dismiss();
+                        return;
+                    }
+                    switchMode(targetMode);
+                    dialog.dismiss();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void switchMode(String targetMode) {
+        if (ProxyStore.MODE_VPN.equals(targetMode)) {
+            VpnProxyController controller = new VpnProxyController(this);
+            Intent permissionIntent = controller.preparePermissionIntent();
+            if (permissionIntent != null) {
+                pendingApplyIdentifier = null;
+                pendingSwitchToVpn = true;
+                vpnPermissionLauncher.launch(permissionIntent);
+                return;
+            }
+            store.setRuntimeMode(ProxyStore.MODE_VPN);
+            store.setActiveIdentifier(ProxyStore.DIRECT_IDENTIFIER);
+            controller.stopVpn();
+            reloadProfiles();
+            return;
+        }
+        store.setRuntimeMode(ProxyStore.MODE_ROOT);
+        new VpnProxyController(this).stopVpn();
+        requestModuleStatus();
+        requestWiFiSnapshot(false);
+        reloadProfiles();
     }
 
     private void setOperationInProgress(boolean value) {
@@ -462,9 +611,12 @@ public final class MainActivity extends AppCompatActivity {
                      ProxyProfile temporaryProfile,
                      List<String> quickWifiSsids,
                      String currentSsid,
-                     boolean moduleReady) {
+                     boolean moduleReady,
+                     boolean vpnMode) {
             rows.clear();
-            if (!moduleReady) {
+            if (vpnMode) {
+                rows.add(Row.footer("Mode: Non-root VPN. System-wide HTTP proxy is applied via VPN service."));
+            } else if (!moduleReady) {
                 rows.add(Row.footer("LSPosed module not active. Tap any action to see setup guide."));
             }
             rows.add(Row.header("Direct"));
@@ -472,7 +624,7 @@ public final class MainActivity extends AppCompatActivity {
             if (temporaryProfile != null) {
                 rows.add(Row.temporary(temporaryProfile, activeIdentifier));
             }
-            rows.add(Row.footer("Tap Direct or a saved proxy to update active Wi-Fi HTTP proxy."));
+            rows.add(Row.footer("Tap Direct or a saved proxy to update active HTTP proxy."));
 
             rows.add(Row.header("Profiles"));
             if (profiles.isEmpty()) {
@@ -484,7 +636,9 @@ public final class MainActivity extends AppCompatActivity {
             }
 
             rows.add(Row.header("Wi-Fi"));
-            if (quickWifiSsids.isEmpty()) {
+            if (vpnMode) {
+                rows.add(Row.footer("Wi-Fi switching is only available in Root mode."));
+            } else if (quickWifiSsids.isEmpty()) {
                 rows.add(Row.footer("Add saved SSIDs here for quick switching."));
             } else {
                 for (String ssid : quickWifiSsids) {
@@ -618,24 +772,31 @@ public final class MainActivity extends AppCompatActivity {
                     "Direct", "No HTTP proxy", null, null);
         }
 
-        static Row temporary(ProxyProfile profile, String activeIdentifier) {
+        static Row temporary(ProxyProfile temporary, String activeIdentifier) {
+            if (temporary == null) {
+                return null;
+            }
             return new Row(false, false, false, true,
                     ProxyStore.TEMPORARY_IDENTIFIER.equals(activeIdentifier),
-                    "Temporary", profile.endpoint(), null, null);
+                    temporary.name,
+                    temporary.endpoint(),
+                    null,
+                    null);
         }
 
         static Row profile(ProxyProfile profile, String activeIdentifier) {
             return new Row(false, false, false, false,
-                    profile.identifier.equals(activeIdentifier),
-                    profile.name, profile.endpoint(), profile, null);
+                    profile != null && profile.identifier.equals(activeIdentifier),
+                    profile == null ? "Proxy" : profile.name,
+                    profile == null ? "" : profile.endpoint(),
+                    profile,
+                    null);
         }
 
         static Row wifi(String ssid, boolean current, String proxyHint) {
-            return new Row(false, false, false, false, current,
-                    ssid,
-                    (current ? "Current" : "Saved Wi-Fi") + " · Proxy: " + (proxyHint == null || proxyHint.isEmpty() ? "Direct" : proxyHint),
-                    null,
-                    ssid);
+            String subtitle = (current ? "Current" : "Saved Wi-Fi")
+                    + " · Proxy: " + (proxyHint == null || proxyHint.isEmpty() ? "Direct" : proxyHint);
+            return new Row(false, false, false, false, current, ssid, subtitle, null, ssid);
         }
     }
 }

@@ -2,6 +2,10 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
+        android:id="@+id/action_mode"
+        android:title="Mode"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_add_tile"
         android:icon="@drawable/ic_tiles_24"
         android:title="Add Tile"
