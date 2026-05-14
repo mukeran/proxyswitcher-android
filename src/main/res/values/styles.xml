@@ -1,9 +1,10 @@
 <resources>
-    <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:fontFamily">sans</item>
+    <style name="AppTheme" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:statusBarColor">@color/proxy_surface</item>
-        <item name="android:navigationBarColor">@color/proxy_surface</item>
-        <item name="android:colorAccent">@color/proxy_teal</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="colorPrimary">@color/proxy_teal</item>
+        <item name="colorSecondary">@color/proxy_teal</item>
     </style>
 </resources>
