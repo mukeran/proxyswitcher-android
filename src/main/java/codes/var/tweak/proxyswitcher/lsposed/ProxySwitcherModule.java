@@ -351,6 +351,9 @@ public final class ProxySwitcherModule implements IXposedHookLoadPackage {
             if (!switched) {
                 switched = connectViaLegacyApis(wifiManager, config.networkId);
             }
+            if (switched) {
+                clearOverrideAndFollowWifi(context);
+            }
             XposedBridge.log("ProxySwitcher: switch wifi " + (switched ? "ok" : "failed")
                     + " ssid=" + targetSsid + " netId=" + config.networkId);
         } catch (Throwable throwable) {
@@ -433,7 +436,9 @@ public final class ProxySwitcherModule implements IXposedHookLoadPackage {
             WifiInfo info = wifiManager.getConnectionInfo();
             String connectedSsid = normalizeSsid(info == null ? null : info.getSSID());
             result.currentSsid = connectedSsid == null ? "" : connectedSsid;
-            if (connectedSsid != null && proxyBySsid.containsKey(connectedSsid)) {
+            if (hasOverride) {
+                result.currentProxy = proxyHint(currentProxy);
+            } else if (connectedSsid != null && proxyBySsid.containsKey(connectedSsid)) {
                 String hint = proxyBySsid.get(connectedSsid);
                 result.currentProxy = hint == null || hint.isEmpty() ? "Direct" : hint;
             }
@@ -449,6 +454,14 @@ public final class ProxySwitcherModule implements IXposedHookLoadPackage {
         }
         try {
             ProxyInfo proxyInfo = configuration.getHttpProxy();
+            return proxyHint(proxyInfo);
+        } catch (Throwable ignored) {
+            return "Direct";
+        }
+    }
+
+    private static String proxyHint(ProxyInfo proxyInfo) {
+        try {
             if (proxyInfo == null || proxyInfo.getHost() == null || proxyInfo.getHost().isEmpty()) {
                 return "Direct";
             }
@@ -456,6 +469,13 @@ public final class ProxySwitcherModule implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {
             return "Direct";
         }
+    }
+
+    private static void clearOverrideAndFollowWifi(Context context) {
+        hasOverride = false;
+        currentProxy = null;
+        updateGlobalProxy(context, null);
+        forceStopSettings(context);
     }
 
     private static boolean connectViaHiddenApis(Context context,
